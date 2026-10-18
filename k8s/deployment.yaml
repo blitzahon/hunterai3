@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-agent
+  namespace: rag-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rag-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rag-agent
+    spec:
+      containers:
+        - name: api
+          image: rag-agent:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+          env:
+            - name: RAG_HOST
+              value: "0.0.0.0"
+            - name: RAG_PORT
+              value: "5000"
+            - name: RAG_DEBUG
+              value: "false"
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: rag-agent-secrets
+                  key: GROQ_API_KEY
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
