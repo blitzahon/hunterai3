@@ -3,14 +3,17 @@ from the local knowledge base and/or search the web. Also holds short-term
 conversation memory: prior turns are passed back in on each call so the
 agent has context of what was already discussed.
 
-Uses Groq (OpenAI-compatible tool-calling format).
+Uses Gemini on Vertex AI through the google-genai SDK. Authentication comes
+from the Cloud Run service account (or `gcloud auth application-default
+login` on your PC), so there is no API key.
 """
 
-import json
+import os
 import re
 
 from ddgs import DDGS
-from groq import BadRequestError, Groq
+from google import genai
+from google.genai import types
 
 from rag.retriever import Retriever
 
@@ -42,55 +45,53 @@ SYSTEM_PROMPT = (
     "If neither tool surfaces the answer, say so plainly instead of guessing."
 )
 
-RETRIEVE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "retrieve",
-        "description": (
-            "Search the local knowledge base (the user's uploaded documents) "
-            "for relevant passages."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "A focused search query"},
-                "top_k": {
-                    "type": "integer",
-                    "description": "Number of passages to retrieve",
-                    "default": 5,
-                },
-            },
-            "required": ["query"],
+RETRIEVE_TOOL = types.FunctionDeclaration(
+    name="retrieve",
+    description=(
+        "Search the local knowledge base (the user's uploaded documents) "
+        "for relevant passages."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING, description="A focused search query"
+            ),
+            "top_k": types.Schema(
+                type=types.Type.INTEGER,
+                description="Number of passages to retrieve (default 5)",
+            ),
         },
-    },
-}
+        required=["query"],
+    ),
+)
 
-SEARCH_WEB_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "search_web",
-        "description": (
-            "Search the live internet for current information, general "
-            "knowledge, or anything not covered by the local knowledge base."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The web search query"},
-                "max_results": {
-                    "type": "integer",
-                    "description": "Number of results to return",
-                    "default": 5,
-                },
-            },
-            "required": ["query"],
+SEARCH_WEB_TOOL = types.FunctionDeclaration(
+    name="search_web",
+    description=(
+        "Search the live internet for current information, general "
+        "knowledge, or anything not covered by the local knowledge base."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "query": types.Schema(
+                type=types.Type.STRING, description="The web search query"
+            ),
+            "max_results": types.Schema(
+                type=types.Type.INTEGER,
+                description="Number of results to return (default 5)",
+            ),
         },
-    },
-}
+        required=["query"],
+    ),
+)
 
 # How many prior turns (user+assistant pairs) to carry into each request.
 # Keeps token usage bounded on long conversations instead of growing forever.
 MAX_HISTORY_TURNS = 8
+
+DEFAULT_MODEL = "gemini-2.5-flash"
 
 
 def search_web(query: str, max_results: int = 5) -> str:
@@ -112,11 +113,62 @@ def search_web(query: str, max_results: int = 5) -> str:
     return "\n\n".join(formatted)
 
 
+def _history_to_contents(history: list) -> list:
+    """Convert [{"role": "user"|"assistant", "content": str}] to Gemini Contents."""
+    contents = []
+    for turn in history:
+        if not isinstance(turn, dict):
+            continue
+        text = (turn.get("content") or "").strip()
+        if not text:
+            continue
+        role = "model" if turn.get("role") == "assistant" else "user"
+        contents.append(
+            types.Content(role=role, parts=[types.Part.from_text(text=text)])
+        )
+    # A conversation must open with a user turn.
+    while contents and contents[0].role == "model":
+        contents.pop(0)
+    return contents
+
+
 class RAGAgent:
-    def __init__(self, retriever: Retriever, model: str = "openai/gpt-oss-20b"):
+    def __init__(self, retriever: Retriever, model: str | None = None):
         self.retriever = retriever
-        self.model = model
-        self.client = Groq()  # reads GROQ_API_KEY from env
+        self.model = model or os.getenv("VERTEX_MODEL", DEFAULT_MODEL)
+
+        project = os.getenv("GOOGLE_CLOUD_PROJECT")
+        if not project:
+            raise RuntimeError(
+                "GOOGLE_CLOUD_PROJECT is not set. Set it to your GCP project ID."
+            )
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+        # Uses Application Default Credentials: the Cloud Run service account
+        # in the cloud, or `gcloud auth application-default login` locally.
+        self.client = genai.Client(vertexai=True, project=project, location=location)
+
+    def _run_tool(self, name: str, args: dict) -> str:
+        try:
+            if name == "retrieve":
+                query = str(args.get("query", "")).strip()
+                top_k = max(1, min(int(args.get("top_k") or 5), 10))
+                results = self.retriever.retrieve(query, top_k)
+                return (
+                    "\n\n".join(
+                        f"[{r['metadata']['source']} #{r['metadata']['chunk_index']}] {r['chunk']}"
+                        for r in results
+                    )
+                    or "No relevant results found."
+                )
+
+            if name == "search_web":
+                query = str(args.get("query", "")).strip()
+                max_results = max(1, min(int(args.get("max_results") or 5), 10))
+                return search_web(query, max_results)
+
+            return f"Unknown tool: {name}"
+        except Exception as e:
+            return f"Tool {name} failed: {e}"
 
     def answer(self, question: str, history: list[dict] | None = None, max_turns: int = 6) -> str:
         """Answer a question, optionally with prior conversation turns.
@@ -129,88 +181,73 @@ class RAGAgent:
         # keep only the most recent turns so the request doesn't grow unbounded
         trimmed_history = history[-(MAX_HISTORY_TURNS * 2):]
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *trimmed_history,
-            {"role": "user", "content": question},
-        ]
+        contents = _history_to_contents(trimmed_history)
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=question)])
+        )
 
-        retry_count = 0
-        max_retries = 3
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0,
+            # Gemini 2.5+/3 "thinking" tokens count toward this limit, so keep it generous.
+            max_output_tokens=4096,
+            tools=[types.Tool(function_declarations=[RETRIEVE_TOOL, SEARCH_WEB_TOOL])],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        )
+
+        malformed_retries = 0
+        max_malformed_retries = 3
 
         for _ in range(max_turns):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=1024,
-                    temperature=0,
-                    tools=[RETRIEVE_TOOL, SEARCH_WEB_TOOL],
-                    tool_choice="auto",
-                    parallel_tool_calls=False,
-                    messages=messages,
-                )
-                retry_count = 0
-            except BadRequestError as e:
-                if "tool_use_failed" in str(e) and retry_count < max_retries:
-                    retry_count += 1
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Your last tool call was malformed. Call the tool again "
-                                "using exactly the correct JSON function-call format."
-                            ),
-                        }
-                    )
-                    continue
-                return f"Model repeatedly failed to call the tool correctly: {e}"
-
-            choice = response.choices[0]
-            msg = choice.message
-
-            if not msg.tool_calls:
-                return msg.content or ""
-
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in msg.tool_calls
-                    ],
-                }
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config,
             )
 
-            for tc in msg.tool_calls:
-                args = json.loads(tc.function.arguments)
+            if not response.candidates:
+                return "The model returned no answer (the request may have been blocked)."
 
-                if tc.function.name == "retrieve":
-                    results = self.retriever.retrieve(args["query"], args.get("top_k", 5))
-                    tool_output = "\n\n".join(
-                        f"[{r['metadata']['source']} #{r['metadata']['chunk_index']}] {r['chunk']}"
-                        for r in results
-                    ) or "No relevant results found."
+            candidate = response.candidates[0]
+            finish_reason = str(getattr(candidate, "finish_reason", "") or "")
 
-                elif tc.function.name == "search_web":
-                    tool_output = search_web(args["query"], args.get("max_results", 5))
+            if "MALFORMED_FUNCTION_CALL" in finish_reason:
+                if malformed_retries < max_malformed_retries:
+                    malformed_retries += 1
+                    contents.append(
+                        types.Content(
+                            role="user",
+                            parts=[
+                                types.Part.from_text(
+                                    text=(
+                                        "Your last tool call was malformed. Call the tool "
+                                        "again using exactly the correct function-call format."
+                                    )
+                                )
+                            ],
+                        )
+                    )
+                    continue
+                return "Model repeatedly failed to call the tool correctly."
 
-                else:
-                    tool_output = f"Unknown tool: {tc.function.name}"
+            function_calls = response.function_calls or []
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": tool_output,
-                    }
+            if not function_calls:
+                return response.text or ""
+
+            # Keep the model's own turn verbatim (it can carry thought
+            # signatures that Gemini needs to see again on the next call).
+            contents.append(candidate.content)
+
+            response_parts = []
+            for fc in function_calls:
+                tool_output = self._run_tool(fc.name, dict(fc.args or {}))
+                response_parts.append(
+                    types.Part.from_function_response(
+                        name=fc.name,
+                        response={"output": tool_output},
+                    )
                 )
+            contents.append(types.Content(role="user", parts=response_parts))
 
         return "Reached max reasoning turns without a final answer."

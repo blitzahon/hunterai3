@@ -1,0 +1,12 @@
+.git/
+.idea/
+.junie/
+.ai/
+k8s/
+tests/
+venv/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
