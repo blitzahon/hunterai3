@@ -25,5 +25,5 @@ def test_document_upload_endpoint_accepts_files(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["status"] == "queued"
+    assert payload["status"] == "indexed"
     assert payload["documents"] == ["sample.txt"]

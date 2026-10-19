@@ -8,26 +8,24 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime
 from typing import Optional
 
-from werkzeug.security import generate_password_hash, check_password_hash
-
 from sqlalchemy import (
-    Column,
-    String,
-    DateTime,
     Boolean,
+    Column,
+    DateTime,
     ForeignKey,
+    String,
     create_engine,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from werkzeug.security import check_password_hash, generate_password_hash
 
-DATABASE_URL = os.getenv("RAG_DB_URL")  # e.g. postgres://user:pass@host:5432/db
+
+# e.g. postgresql+psycopg2://user:pass@host:5432/db
+# On Cloud Run: postgresql+psycopg2://user:pass@/dbname?host=/cloudsql/PROJECT:REGION:INSTANCE
+DATABASE_URL = os.getenv("RAG_DB_URL")
 
 Base = declarative_base()
 _engine = None
@@ -58,15 +56,14 @@ class ApiKey(Base):
 def init_db(url: Optional[str] = None):
     """Initialize DB connection and create tables if needed.
 
-    If DATABASE_URL is not set, this function is a no-op and returns False.
+    If no URL is given and RAG_DB_URL is not set, this is a no-op and returns False.
     """
     global _engine, _SessionLocal
     db_url = url or DATABASE_URL
     if not db_url:
         return False
 
-    # create engine
-    _engine = create_engine(db_url, future=True)
+    _engine = create_engine(db_url, future=True, pool_pre_ping=True)
     _SessionLocal = sessionmaker(bind=_engine)
     Base.metadata.create_all(bind=_engine)
     return True

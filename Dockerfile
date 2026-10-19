@@ -1,22 +1,24 @@
-FROM python:3.12-slim
+# Stage 1: Build the Vite Frontend
+FROM node:18-alpine AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
 
+# Stage 2: Build Python Backend
+FROM python:3.12-slim
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# CPU-only torch (Cloud Run has no GPU): much smaller image, faster cold starts
-RUN pip install --upgrade pip \
-    && pip install torch --index-url https://download.pytorch.org/whl/cpu
-
-COPY requirements.txt ./requirements.txt
-RUN pip install -r requirements.txt
-
-# Bake the embedding model into the image so cold starts don't download it
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-
+# Copy backend code
 COPY . .
+
+# Copy compiled frontend build into static directory
+COPY --from=frontend-builder /app/frontend/dist ./static
 
 EXPOSE 5000
 

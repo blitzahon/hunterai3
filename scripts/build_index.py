@@ -11,10 +11,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pypdf import PdfReader
-
+import threading
 from rag.embedder import Embedder
 from rag.retriever import Retriever
 from rag.vector_store import VectorStore
+
 
 RAW_DIR = "data/raw"
 INDEX_PATH = "data/index/store.pkl"
@@ -43,7 +44,10 @@ def read_pdf(path: str) -> str | None:
         return None
 
 
-def build_index(raw_dir: str = RAW_DIR, index_path: str = INDEX_PATH) -> dict:
+    
+
+
+def _build_index(raw_dir: str = RAW_DIR, index_path: str = INDEX_PATH) -> dict:
     """Build or rebuild the persisted vector index from raw documents."""
     embedder = Embedder()
     store = VectorStore()
@@ -91,6 +95,13 @@ def build_index(raw_dir: str = RAW_DIR, index_path: str = INDEX_PATH) -> dict:
         "index_path": index_path,
         "status": "built",
     }
+
+_build_lock = threading.Lock()
+
+def build_index(raw_dir: str = RAW_DIR, index_path: str = INDEX_PATH) -> dict:
+    """Only one index build at a time (upload jobs, /api/reindex and bucket events share this)."""
+    with _build_lock:
+        return _build_index(raw_dir, index_path)    
 
 
 def main():

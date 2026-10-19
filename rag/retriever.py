@@ -31,5 +31,6 @@ class Retriever:
             self.store.add(vectors, chunks, metadata)
 
     def retrieve(self, query: str, top_k: int = 5) -> list[dict]:
-        query_vector = self.embedder.embed([query])[0]
+        embed_query = getattr(self.embedder, "embed_query", self.embedder.embed)
+        query_vector = embed_query([query])[0]
         return self.store.search(query_vector, top_k)

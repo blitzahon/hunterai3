@@ -6,3 +6,6 @@ data/index/*.pkl
 .pytest_cache/
 frontend/node_modules/
 frontend/dist/
+
+frontend/node_modules/
+frontend/dist/
