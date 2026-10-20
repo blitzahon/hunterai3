@@ -14,6 +14,10 @@ from typing import Optional
 from pydantic import BaseModel
 
 from dotenv import load_dotenv
+
+# Load .env before importing modules that read settings at import time.
+load_dotenv()
+
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Depends, Request, Response, Body
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
@@ -42,8 +46,6 @@ else:
         force=True
     )
     logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 INDEX_PATH = settings.index_path
 RAW_DIR = "data/raw"
@@ -154,14 +156,16 @@ def create_app() -> FastAPI:
 
     logger.info("🚀 Initializing FastAPI app...")
 
-    # CORS Middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # The UI is served from this same origin, so CORS is off unless other origins are listed explicitly.
+    cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+    if cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # Initialize auth DB if configured
     if settings.db_url:
@@ -173,45 +177,42 @@ def create_app() -> FastAPI:
         except Exception as e:
             logger.warning(f"⚠️ Database initialization failed (continuing): {e}")
 
-    def verify_api_key(authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None)) -> Optional[dict]:
-        """Dependency to verify API key when DB is configured."""
-        if not settings.db_url:
-            return None
+    if not google_auth.enabled() and not settings.db_url:
+        logger.warning("⚠️ Neither GOOGLE_CLIENT_ID nor RAG_DB_URL is set: the API is open to anyone.")
 
-        token = None
+    def _api_token(authorization: Optional[str], x_api_key: Optional[str]) -> Optional[str]:
         if authorization:
-            if authorization.startswith("ApiKey "):
-                token = authorization[len("ApiKey "):].strip()
-            elif authorization.startswith("Bearer "):
-                token = authorization[len("Bearer "):].strip()
+            for prefix in ("ApiKey ", "Bearer "):
+                if authorization.startswith(prefix):
+                    return authorization[len(prefix):].strip() or None
+        return x_api_key
 
-        if not token:
-            token = x_api_key
+    def require_auth(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+        x_api_key: Optional[str] = Header(None),
+    ):
+        """Allow a valid API key or a signed-in Google user. Auth is off only when neither is configured."""
+        token = _api_token(authorization, x_api_key)
+        if token:
+            if not settings.db_url:
+                raise HTTPException(status_code=401, detail="API keys are not enabled on this server.")
+            from services.auth import verify_api_key as verify_token
+            ws = verify_token(token)
+            if not ws:
+                raise HTTPException(status_code=401, detail="Invalid API key")
+            return ws
 
-        if not token:
-            raise HTTPException(status_code=401, detail="Missing API key")
+        user = google_auth.user_from_request(request)
+        if user:
+            return user
 
-        from services.auth import verify_api_key as verify_token
-        ws = verify_token(token)
-        if not ws:
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        if google_auth.enabled() or settings.db_url:
+            raise HTTPException(status_code=401, detail="Sign in required")
+        return None
 
-        return ws
-
-    def _access(open_if_login_off: bool):
-        """Signed-in user or API key verification dependency."""
-        def dep(
-            request: Request,
-            authorization: Optional[str] = Header(None),
-            x_api_key: Optional[str] = Header(None),
-        ):
-            if authorization or x_api_key:
-                return verify_api_key(authorization, x_api_key)
-            return None if open_if_login_off else verify_api_key(None, None)
-        return dep
-
-    require_user = _access(True)     # ask / list documents
-    require_writer = _access(False)  # upload / delete / reindex / jobs
+    require_user = require_auth    # ask / list documents
+    require_writer = require_auth  # upload / delete / reindex / jobs
 
     @app.get("/api/config")
     async def public_config():

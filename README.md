@@ -53,6 +53,26 @@ add new documents or change chunking/embedding settings.
 - `GET /api/documents` — lists the currently uploaded raw document files
 - `POST /api/reindex` — rebuilds the vector store from `data/raw`
 
+## Google sign-in
+
+Sign-in is enforced on the server: once `GOOGLE_CLIENT_ID` is set, every
+`/api/*` route except `/api/health`, `/api/config` and the `/api/auth/*`
+routes needs a signed-in user or an API key.
+
+1. In Google Cloud Console, open **APIs & Services → Credentials** and create an
+   **OAuth client ID** of type **Web application**.
+2. Under **Authorized JavaScript origins**, add every URL the app is opened from,
+   e.g. `http://localhost:5000` and your Cloud Run URL. No redirect URIs are needed.
+3. Set these environment variables (in `.env` locally, or on the Cloud Run service):
+   - `GOOGLE_CLIENT_ID` — the client ID from step 1
+   - `SESSION_SECRET` — a long random string that signs the session cookie;
+     use the same value on every instance (`python -c "import secrets; print(secrets.token_urlsafe(32))"`)
+   - `ALLOWED_EMAILS` — optional, e.g. `alice@gmail.com,@mycompany.com`
+
+Sessions last 7 days (`SESSION_MAX_AGE_HOURS`). `ALLOWED_EMAILS` is re-checked
+on every request, so removing someone takes effect immediately. If neither
+`GOOGLE_CLIENT_ID` nor `RAG_DB_URL` is set, the API is open (local development only).
+
 ## How it works
 
 - **`rag/chunker.py`** — splits text into overlapping, sentence-aware chunks
