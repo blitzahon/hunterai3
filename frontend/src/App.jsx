@@ -119,7 +119,7 @@ function Workspace({ user, onSignOut, onExpired }) {
     setPending(true);
     try {
       const res = await api.ask(question, history);
-      addMessage(chatId, { role: "assistant", content: res.answer });
+      addMessage(chatId, { role: "assistant", content: res.answer, usage: res.usage });
     } catch (e) {
       addMessage(chatId, { role: "assistant", error: true, content: guard(e) || "Something went wrong." });
     } finally {

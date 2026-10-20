@@ -13,9 +13,9 @@ def _call(name, **args):
     return SimpleNamespace(name=name, args=args)
 
 
-def _response(function_calls=None, text=""):
+def _response(function_calls=None, text="", usage=None):
     candidate = SimpleNamespace(finish_reason="STOP", content=types.Content(role="model", parts=[]))
-    return SimpleNamespace(candidates=[candidate], function_calls=function_calls, text=text)
+    return SimpleNamespace(candidates=[candidate], function_calls=function_calls, text=text, usage_metadata=usage)
 
 
 class FakeModels:
@@ -92,3 +92,22 @@ def test_last_turn_disables_tools_so_the_model_must_answer(monkeypatch):
     assert a.answer("q", max_turns=6) == "final answer"
     assert models.configs[-1].tool_config.function_calling_config.mode == types.FunctionCallingConfigMode.NONE
     assert all(c.tool_config is None for c in models.configs[:-1])
+
+
+def test_token_usage_is_summed_over_every_model_call(monkeypatch):
+    def meta(p, c, t):
+        return types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=p, candidates_token_count=c, thoughts_token_count=t, total_token_count=p + c + t
+        )
+
+    monkeypatch.setattr(agent_mod, "search_web", lambda q, max_results=5: "result")
+    a = _agent([
+        _response([_call("search_web", query="a")], usage=meta(100, 10, 50)),
+        _response(text="done", usage=meta(300, 40, 0)),
+    ])
+
+    text, usage = a.answer_with_usage("q")
+    assert text == "done"
+    assert usage == {
+        "input_tokens": 400, "output_tokens": 50, "thinking_tokens": 50, "total_tokens": 500, "model_calls": 2,
+    }

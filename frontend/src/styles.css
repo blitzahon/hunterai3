@@ -334,3 +334,10 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   .status-dot span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+.usage {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 10px; vertical-align: baseline;
+  font: 600 11px/1 var(--mono); color: var(--muted); padding: 4px 8px; border-radius: 999px;
+  background: rgb(139 92 246 / 0.12); border: 1px solid rgb(139 92 246 / 0.25); cursor: help;
+}
+.usage:hover { color: var(--text); border-color: var(--pink); }

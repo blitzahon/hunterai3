@@ -156,6 +156,18 @@ def _history_to_contents(history: list) -> list:
     return contents
 
 
+def _add_usage(usage: dict, response) -> None:
+    meta = getattr(response, "usage_metadata", None)
+    usage["model_calls"] += 1
+    if not meta:
+        return
+    # Tool results we send back count as input, so input grows with each turn of the loop.
+    usage["input_tokens"] += meta.prompt_token_count or 0
+    usage["output_tokens"] += meta.candidates_token_count or 0
+    usage["thinking_tokens"] += meta.thoughts_token_count or 0
+    usage["total_tokens"] += meta.total_token_count or 0
+
+
 class RAGAgent:
     def __init__(self, retriever: Retriever, model: str | None = None):
         self.retriever = retriever
@@ -205,7 +217,12 @@ class RAGAgent:
             return f"Tool {name} failed: {e}"
 
     def answer(self, question: str, history: list[dict] | None = None, max_turns: int = 6) -> str:
-        """Answer a question, optionally with prior conversation turns.
+        return self.answer_with_usage(question, history, max_turns)[0]
+
+    def answer_with_usage(
+        self, question: str, history: list[dict] | None = None, max_turns: int = 6
+    ) -> tuple[str, dict]:
+        """Answer a question and report the Gemini tokens it used, summed over every model call.
 
         `history` is a list of {"role": "user"|"assistant", "content": str}
         dicts representing the finished turns before this one — tool-call
@@ -243,6 +260,7 @@ class RAGAgent:
         malformed_retries = 0
         max_malformed_retries = 3
         tool_state = {"searches": 0, "search_blocked": False}
+        usage = {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "total_tokens": 0, "model_calls": 0}
 
         for turn in range(max_turns):
             last_turn = turn == max_turns - 1
@@ -256,9 +274,10 @@ class RAGAgent:
                 if e.code == 429:
                     raise ModelBusyError(str(e)) from e
                 raise
+            _add_usage(usage, response)
 
             if not response.candidates:
-                return "The model returned no answer (the request may have been blocked)."
+                return "The model returned no answer (the request may have been blocked).", usage
 
             candidate = response.candidates[0]
             finish_reason = str(getattr(candidate, "finish_reason", "") or "")
@@ -280,12 +299,12 @@ class RAGAgent:
                         )
                     )
                     continue
-                return "Model repeatedly failed to call the tool correctly."
+                return "Model repeatedly failed to call the tool correctly.", usage
 
             function_calls = response.function_calls or []
 
             if not function_calls:
-                return response.text or ""
+                return response.text or "", usage
             if last_turn:
                 break
 
@@ -313,4 +332,4 @@ class RAGAgent:
                 )
             contents.append(types.Content(role="user", parts=response_parts))
 
-        return "Sorry, I couldn't put together an answer this time. Please try rephrasing the question."
+        return "Sorry, I couldn't put together an answer this time. Please try rephrasing the question.", usage

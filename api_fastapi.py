@@ -62,8 +62,16 @@ class AskRequest(BaseModel):
 class GoogleLogin(BaseModel):
     credential: str
 
+class TokenUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0
+    total_tokens: int = 0
+    model_calls: int = 0
+
 class AskResponse(BaseModel):
     answer: str
+    usage: Optional[TokenUsage] = None
 
 class ErrorResponse(BaseModel):
     error: str
@@ -267,8 +275,9 @@ def create_app() -> FastAPI:
         from rag.agent import ModelBusyError
 
         try:
-            answer = get_agent().answer(question, history=history)
-            return AskResponse(answer=answer)
+            answer, usage = get_agent().answer_with_usage(question, history=history)
+            logger.info(f"🔢 Tokens used: {usage}")
+            return AskResponse(answer=answer, usage=usage)
         except ModelBusyError as e:
             logger.warning(f"⏳ Model rate-limited: {e}")
             raise HTTPException(

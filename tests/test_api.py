@@ -105,11 +105,28 @@ def test_cors_is_off_by_default(client):
     assert "access-control-allow-origin" not in response.headers
 
 
+def test_ask_returns_answer_with_token_usage(client, monkeypatch, tmp_path):
+    usage = {"input_tokens": 120, "output_tokens": 30, "thinking_tokens": 10, "total_tokens": 160, "model_calls": 2}
+
+    class FakeAgent:
+        def answer_with_usage(self, *a, **k):
+            return "hello", usage
+
+    index = tmp_path / "store.pkl"
+    index.write_bytes(b"")
+    monkeypatch.setattr("api_fastapi.INDEX_PATH", str(index))
+    monkeypatch.setattr("api_fastapi.get_agent", lambda: FakeAgent())
+
+    response = client.post("/api/ask", json={"question": "hi"})
+    assert response.status_code == 200
+    assert response.json() == {"answer": "hello", "usage": usage}
+
+
 def test_ask_returns_503_when_the_model_is_rate_limited(client, monkeypatch, tmp_path):
     from rag.agent import ModelBusyError
 
     class BusyAgent:
-        def answer(self, *a, **k):
+        def answer_with_usage(self, *a, **k):
             raise ModelBusyError("429 RESOURCE_EXHAUSTED")
 
     index = tmp_path / "store.pkl"

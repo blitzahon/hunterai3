@@ -8,6 +8,19 @@ const SUGGESTIONS = [
   { icon: "🌐", title: "What's new on this topic?", sub: "Blend your docs with the live web" },
 ];
 
+const fmt = (n) => (n || 0).toLocaleString();
+
+// Small line under an answer: total tokens, with the breakdown on hover.
+function Usage({ u }) {
+  if (!u?.total_tokens) return null;
+  const detail = `Input ${fmt(u.input_tokens)} · Output ${fmt(u.output_tokens)} · Thinking ${fmt(u.thinking_tokens)} · ${u.model_calls} model call${u.model_calls === 1 ? "" : "s"}`;
+  return (
+    <sub className="usage" title={detail}>
+      ⚡ {fmt(u.total_tokens)} tokens
+    </sub>
+  );
+}
+
 function Message({ m }) {
   if (m.role === "user") {
     return (
@@ -19,7 +32,10 @@ function Message({ m }) {
   return (
     <div className={`msg assistant ${m.error ? "failed" : ""}`}>
       <div className="avatar">H</div>
-      <div className="bubble">{m.error ? <p>{m.content}</p> : <Markdown text={m.content} />}</div>
+      <div className="bubble">
+        {m.error ? <p>{m.content}</p> : <Markdown text={m.content} />}
+        <Usage u={m.usage} />
+      </div>
     </div>
   );
 }
