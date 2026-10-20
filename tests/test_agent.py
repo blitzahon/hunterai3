@@ -70,3 +70,25 @@ def test_model_rate_limit_raises_model_busy():
     a = _agent([errors.ClientError(429, {"error": {"code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"}})])
     with pytest.raises(ModelBusyError):
         a.answer("q")
+
+
+class RecordingModels(FakeModels):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.configs = []
+
+    def generate_content(self, **kwargs):
+        self.configs.append(kwargs["config"])
+        return super().generate_content(**kwargs)
+
+
+def test_last_turn_disables_tools_so_the_model_must_answer(monkeypatch):
+    monkeypatch.setattr(agent_mod, "search_web", lambda q, max_results=5: "result")
+    a = _agent([])
+    a.retriever = SimpleNamespace(retrieve=lambda q, k: [])
+    models = RecordingModels([_response([_call("retrieve", query=str(i))]) for i in range(5)] + [_response(text="final answer")])
+    a.client = SimpleNamespace(models=models)
+
+    assert a.answer("q", max_turns=6) == "final answer"
+    assert models.configs[-1].tool_config.function_calling_config.mode == types.FunctionCallingConfigMode.NONE
+    assert all(c.tool_config is None for c in models.configs[:-1])

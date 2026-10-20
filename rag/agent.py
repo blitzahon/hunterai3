@@ -228,17 +228,29 @@ class RAGAgent:
             tools=[types.Tool(function_declarations=[RETRIEVE_TOOL, SEARCH_WEB_TOOL])],
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         )
+        # On the last turn tools are switched off, so the model has to write an answer
+        # instead of spending every turn on more tool calls.
+        final_config = config.model_copy(
+            update={
+                "tool_config": types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode=types.FunctionCallingConfigMode.NONE
+                    )
+                )
+            }
+        )
 
         malformed_retries = 0
         max_malformed_retries = 3
         tool_state = {"searches": 0, "search_blocked": False}
 
-        for _ in range(max_turns):
+        for turn in range(max_turns):
+            last_turn = turn == max_turns - 1
             try:
                 response = self.client.models.generate_content(
                     model=self.model,
                     contents=contents,
-                    config=config,
+                    config=final_config if last_turn else config,
                 )
             except errors.APIError as e:
                 if e.code == 429:
@@ -274,6 +286,8 @@ class RAGAgent:
 
             if not function_calls:
                 return response.text or ""
+            if last_turn:
+                break
 
             # Keep the model's own turn verbatim (it can carry thought
             # signatures that Gemini needs to see again on the next call).
@@ -288,6 +302,15 @@ class RAGAgent:
                         response={"output": tool_output},
                     )
                 )
+            if turn == max_turns - 2:
+                response_parts.append(
+                    types.Part.from_text(
+                        text=(
+                            "You have used all your tool calls. Write your final answer "
+                            "now from the information you already have."
+                        )
+                    )
+                )
             contents.append(types.Content(role="user", parts=response_parts))
 
-        return "Reached max reasoning turns without a final answer."
+        return "Sorry, I couldn't put together an answer this time. Please try rephrasing the question."
