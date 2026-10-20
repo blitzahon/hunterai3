@@ -64,6 +64,7 @@ export default function Documents({ docs, status, onUpload, onDelete, onClose })
             </>
           ) : (
             <>
+              <span className="drop-icon">📥</span>
               <strong>Drop files here or click to upload</strong>
               <small>PDF, TXT or MD · up to {MAX_MB} MB each</small>
             </>
@@ -75,7 +76,7 @@ export default function Documents({ docs, status, onUpload, onDelete, onClose })
           {docs.length === 0 && <li className="muted">No documents yet.</li>}
           {docs.map((d) => (
             <li key={d.name}>
-              <span className="doc-ext">{d.type.replace(".", "").toUpperCase()}</span>
+              <span className={`doc-ext ${d.type.replace(".", "")}`}>{d.type.replace(".", "").toUpperCase()}</span>
               <span className="doc-name" title={d.name}>
                 {d.name}
               </span>

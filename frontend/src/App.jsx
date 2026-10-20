@@ -187,6 +187,7 @@ function Workspace({ user, onSignOut, onExpired }) {
           + New chat
         </button>
         <nav className="history">
+          {chats.length > 0 && <div className="history-label">Recent chats</div>}
           {chats.map((c) => (
             <div key={c.id} className={`hist-item ${c.id === activeId ? "active" : ""}`}>
               <button
@@ -229,6 +230,9 @@ function Workspace({ user, onSignOut, onExpired }) {
             ☰
           </button>
           <span className="title">{active?.title || "New chat"}</span>
+          <span className={`status-dot ${indexExists ? "" : "off"}`}>
+            <span>{indexExists ? "Knowledge base ready" : "No documents yet"}</span>
+          </span>
         </header>
         <Chat messages={messages} pending={pending} onSend={send} noIndex={!indexExists} onOpenDocs={() => setShowDocs(true)} />
       </main>

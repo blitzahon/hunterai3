@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import Markdown from "./Markdown.jsx";
 
 const SUGGESTIONS = [
-  "Summarize my documents",
-  "What topics do my documents cover?",
-  "Explain the key ideas in simple terms",
+  { icon: "✨", title: "Summarize my documents", sub: "Get the big picture in seconds" },
+  { icon: "🧭", title: "What topics do my documents cover?", sub: "Map out everything you've uploaded" },
+  { icon: "💡", title: "Explain the key ideas simply", sub: "Plain-language breakdowns" },
+  { icon: "🌐", title: "What's new on this topic?", sub: "Blend your docs with the live web" },
 ];
 
 function Message({ m }) {
@@ -53,7 +54,10 @@ export default function Chat({ messages, pending, onSend, noIndex, onOpenDocs })
           {messages.length === 0 && (
             <div className="empty">
               <div className="logo-mark big">H</div>
-              <h2>What would you like to know?</h2>
+              <h2>
+                What would you like to <span className="grad-text">discover</span>?
+              </h2>
+              <p className="sub">Ask about your documents, or anything on the web.</p>
               {noIndex ? (
                 <p className="muted">
                   There are no indexed documents yet.{" "}
@@ -63,10 +67,12 @@ export default function Chat({ messages, pending, onSend, noIndex, onOpenDocs })
                   to get started.
                 </p>
               ) : (
-                <div className="chips">
+                <div className="cards">
                   {SUGGESTIONS.map((s) => (
-                    <button key={s} onClick={() => submit(s)}>
-                      {s}
+                    <button key={s.title} onClick={() => submit(s.title)}>
+                      <span className="icon">{s.icon}</span>
+                      <strong>{s.title}</strong>
+                      <small>{s.sub}</small>
                     </button>
                   ))}
                 </div>
@@ -97,19 +103,21 @@ export default function Chat({ messages, pending, onSend, noIndex, onOpenDocs })
           submit();
         }}
       >
-        <textarea
-          ref={box}
-          rows={1}
-          value={text}
-          placeholder="Ask anything about your documents…"
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-        />
+        <div className="composer-box">
+          <textarea
+            ref={box}
+            rows={1}
+            value={text}
+            placeholder="Ask anything about your documents…"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
+        </div>
         <button type="submit" disabled={!text.trim() || pending} aria-label="Send">
           ↑
         </button>
