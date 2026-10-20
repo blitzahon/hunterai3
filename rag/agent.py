@@ -13,7 +13,7 @@ import re
 
 from ddgs import DDGS
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from rag.retriever import Retriever
 
@@ -24,7 +24,9 @@ SYSTEM_PROMPT = (
     "documents. Use `retrieve` first for anything that might be in the "
     "user's documents. Use `search_web` for current events, general facts, "
     "or anything retrieval doesn't cover. You can call both if a question "
-    "needs information from each.\n\n"
+    "needs information from each. Call `search_web` at most twice per "
+    "question, and if it reports that search is unavailable, don't call it "
+    "again: answer with what you have and say what you couldn't verify.\n\n"
     "You have access to the conversation history. Use it to resolve "
     "references like 'it', 'that', or 'the one you mentioned' to what was "
     "discussed earlier, and don't ask the user to repeat context they "
@@ -93,13 +95,35 @@ MAX_HISTORY_TURNS = 8
 
 DEFAULT_MODEL = "gemini-2.5-flash"
 
+# Each web search costs another model turn, and the scraped search backends often
+# rate-limit cloud IPs, so cap searches per question instead of letting the model retry.
+MAX_WEB_SEARCHES = int(os.getenv("MAX_WEB_SEARCHES", "2"))
+
+SEARCH_UNAVAILABLE = (
+    "Web search is unavailable right now. Do not call search_web again for this "
+    "question. Answer from the documents and what you already know, and say "
+    "plainly if you could not verify something."
+)
+SEARCH_LIMIT_REACHED = (
+    "Web search limit for this question reached. Do not call search_web again. "
+    "Answer from the information you already have."
+)
+
+
+class ModelBusyError(RuntimeError):
+    """The model API is rate-limiting us (HTTP 429); the caller should try again later."""
+
+
+class SearchUnavailableError(RuntimeError):
+    pass
+
 
 def search_web(query: str, max_results: int = 5) -> str:
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
     except Exception as e:
-        return f"Web search failed: {e}"
+        raise SearchUnavailableError(str(e)) from e
 
     if not results:
         return "No web results found."
@@ -147,7 +171,7 @@ class RAGAgent:
         # in the cloud, or `gcloud auth application-default login` locally.
         self.client = genai.Client(vertexai=True, project=project, location=location)
 
-    def _run_tool(self, name: str, args: dict) -> str:
+    def _run_tool(self, name: str, args: dict, state: dict) -> str:
         try:
             if name == "retrieve":
                 query = str(args.get("query", "")).strip()
@@ -162,9 +186,19 @@ class RAGAgent:
                 )
 
             if name == "search_web":
+                if state["search_blocked"]:
+                    return SEARCH_UNAVAILABLE
+                if state["searches"] >= MAX_WEB_SEARCHES:
+                    return SEARCH_LIMIT_REACHED
+                state["searches"] += 1
                 query = str(args.get("query", "")).strip()
                 max_results = max(1, min(int(args.get("max_results") or 5), 10))
-                return search_web(query, max_results)
+                try:
+                    return search_web(query, max_results)
+                except SearchUnavailableError as e:
+                    print(f"[Agent] Web search unavailable: {e}")
+                    state["search_blocked"] = True
+                    return SEARCH_UNAVAILABLE
 
             return f"Unknown tool: {name}"
         except Exception as e:
@@ -197,13 +231,19 @@ class RAGAgent:
 
         malformed_retries = 0
         max_malformed_retries = 3
+        tool_state = {"searches": 0, "search_blocked": False}
 
         for _ in range(max_turns):
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=config,
-            )
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=config,
+                )
+            except errors.APIError as e:
+                if e.code == 429:
+                    raise ModelBusyError(str(e)) from e
+                raise
 
             if not response.candidates:
                 return "The model returned no answer (the request may have been blocked)."
@@ -241,7 +281,7 @@ class RAGAgent:
 
             response_parts = []
             for fc in function_calls:
-                tool_output = self._run_tool(fc.name, dict(fc.args or {}))
+                tool_output = self._run_tool(fc.name, dict(fc.args or {}), tool_state)
                 response_parts.append(
                     types.Part.from_function_response(
                         name=fc.name,

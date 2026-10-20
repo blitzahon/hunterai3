@@ -264,9 +264,18 @@ def create_app() -> FastAPI:
         if not os.path.exists(INDEX_PATH):
             raise HTTPException(status_code=400, detail="No index found. Upload a document first.")
 
+        from rag.agent import ModelBusyError
+
         try:
             answer = get_agent().answer(question, history=history)
             return AskResponse(answer=answer)
+        except ModelBusyError as e:
+            logger.warning(f"⏳ Model rate-limited: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail="The assistant is busy right now. Please try again in a moment.",
+                headers={"Retry-After": "10"},
+            )
         except Exception as e:
             logger.error(f"❌ Error answering question: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"The assistant could not answer that question. {str(e)}")

@@ -6,12 +6,19 @@ authenticated by the Cloud Run service account (or by
 """
 
 import os
+import random
+import time
 
 import numpy as np
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 DEFAULT_MODEL = "text-embedding-005"
+RATE_LIMIT_RETRIES = 4
+
+
+def _is_rate_limited(e: Exception) -> bool:
+    return isinstance(e, errors.APIError) and e.code == 429
 
 
 class Embedder:
@@ -37,12 +44,19 @@ class Embedder:
         print(f"[Embedder] Using Vertex AI model {self.model_name} in {location}")
 
     def _embed_batch(self, texts: list[str], task_type: str) -> list[list[float]]:
-        response = self.client.models.embed_content(
-            model=self.model_name,
-            contents=texts,
-            config=types.EmbedContentConfig(task_type=task_type),
-        )
-        return [e.values for e in response.embeddings]
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            try:
+                response = self.client.models.embed_content(
+                    model=self.model_name,
+                    contents=texts,
+                    config=types.EmbedContentConfig(task_type=task_type),
+                )
+                return [e.values for e in response.embeddings]
+            except Exception as e:
+                if not _is_rate_limited(e) or attempt == RATE_LIMIT_RETRIES:
+                    raise
+                # Back off 1s, 2s, 4s, 8s (plus jitter) before retrying a 429.
+                time.sleep(2 ** attempt + random.random())
 
     def _embed(self, texts: list[str], task_type: str) -> np.ndarray:
         if not texts:
@@ -53,8 +67,8 @@ class Embedder:
             batch = texts[i : i + self.batch_size]
             try:
                 vectors.extend(self._embed_batch(batch, task_type))
-            except Exception:
-                if len(batch) == 1:
+            except Exception as e:
+                if len(batch) == 1 or _is_rate_limited(e):
                     raise
                 # Some embedding models accept only one text per request.
                 for text in batch:

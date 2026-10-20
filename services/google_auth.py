@@ -20,7 +20,8 @@ _fallback_secret: Optional[str] = None
 
 
 def client_id() -> str:
-    return os.getenv("GOOGLE_CLIENT_ID", "")
+    # Tolerate stray whitespace or quotes pasted into the Cloud Run variable.
+    return os.getenv("GOOGLE_CLIENT_ID", "").strip().strip("'\"").strip()
 
 
 def enabled() -> bool:

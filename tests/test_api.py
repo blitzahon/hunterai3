@@ -103,3 +103,21 @@ def test_api_key_header_is_rejected_when_api_keys_are_not_enabled(client, login_
 def test_cors_is_off_by_default(client):
     response = client.get("/api/health", headers={"Origin": "https://evil.example"})
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_ask_returns_503_when_the_model_is_rate_limited(client, monkeypatch, tmp_path):
+    from rag.agent import ModelBusyError
+
+    class BusyAgent:
+        def answer(self, *a, **k):
+            raise ModelBusyError("429 RESOURCE_EXHAUSTED")
+
+    index = tmp_path / "store.pkl"
+    index.write_bytes(b"")
+    monkeypatch.setattr("api_fastapi.INDEX_PATH", str(index))
+    monkeypatch.setattr("api_fastapi.get_agent", lambda: BusyAgent())
+
+    response = client.post("/api/ask", json={"question": "hi"})
+    assert response.status_code == 503
+    assert "busy" in response.json()["detail"]
+    assert response.headers["retry-after"] == "10"
