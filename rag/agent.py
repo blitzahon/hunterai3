@@ -18,15 +18,24 @@ from google.genai import errors, types
 from rag.retriever import Retriever
 
 SYSTEM_PROMPT = (
-    "You answer questions using two tools: `retrieve` searches the local "
-    "knowledge base of uploaded documents, and `search_web` searches the "
-    "live internet for current or general information not in those "
-    "documents. Use `retrieve` first for anything that might be in the "
-    "user's documents. Use `search_web` for current events, general facts, "
-    "or anything retrieval doesn't cover. You can call both if a question "
-    "needs information from each. Call `search_web` at most twice per "
-    "question, and if it reports that search is unavailable, don't call it "
-    "again: answer with what you have and say what you couldn't verify.\n\n"
+    "You answer questions for a user who has uploaded their own documents. "
+    "Those documents are your primary source and always take priority over "
+    "the internet.\n\n"
+    "Each question arrives with passages already retrieved from the "
+    "documents. Work in this order:\n"
+    "1. Answer from those passages whenever they cover the question.\n"
+    "2. If they're not enough, call `retrieve` with a sharper or different "
+    "query (for example, rephrase a follow-up like 'tell me more' into the "
+    "actual topic).\n"
+    "3. Only if the documents still don't cover it, or the question needs "
+    "current events, call `search_web`.\n"
+    "When the documents and the web disagree, go with the documents and "
+    "mention the difference. When part of your answer comes from the web "
+    "rather than the documents, say so briefly (e.g. 'Your documents don't "
+    "cover this, but online sources say…'). Call `search_web` at most twice "
+    "per question, and if it reports that search is unavailable, don't call "
+    "it again: answer with what you have and say what you couldn't "
+    "verify.\n\n"
     "You have access to the conversation history. Use it to resolve "
     "references like 'it', 'that', or 'the one you mentioned' to what was "
     "discussed earlier, and don't ask the user to repeat context they "
@@ -88,6 +97,21 @@ SEARCH_WEB_TOOL = types.FunctionDeclaration(
         required=["query"],
     ),
 )
+
+# Passages fetched from the documents before the model sees the question.
+PRE_RETRIEVE_K = int(os.getenv("PRE_RETRIEVE_K", "5"))
+
+SEARCH_DOCS_FIRST = (
+    "Search the user's documents with `retrieve` before searching the web."
+)
+
+
+def _format_passages(results: list[dict]) -> str:
+    return "\n\n".join(
+        f"[{r['metadata']['source']} #{r['metadata']['chunk_index']}] {r['chunk']}"
+        for r in results
+    )
+
 
 # How many prior turns (user+assistant pairs) to carry into each request.
 # Keeps token usage bounded on long conversations instead of growing forever.
@@ -188,16 +212,14 @@ class RAGAgent:
             if name == "retrieve":
                 query = str(args.get("query", "")).strip()
                 top_k = max(1, min(int(args.get("top_k") or 5), 10))
+                # Counts as checked even if it fails, so a broken index can't block the web for good.
+                state["docs_checked"] = True
                 results = self.retriever.retrieve(query, top_k)
-                return (
-                    "\n\n".join(
-                        f"[{r['metadata']['source']} #{r['metadata']['chunk_index']}] {r['chunk']}"
-                        for r in results
-                    )
-                    or "No relevant results found."
-                )
+                return _format_passages(results) or "No relevant results found."
 
             if name == "search_web":
+                if not state["docs_checked"]:
+                    return SEARCH_DOCS_FIRST
                 if state["search_blocked"]:
                     return SEARCH_UNAVAILABLE
                 if state["searches"] >= MAX_WEB_SEARCHES:
@@ -216,6 +238,25 @@ class RAGAgent:
         except Exception as e:
             return f"Tool {name} failed: {e}"
 
+    def _with_document_context(self, question: str, state: dict) -> str:
+        """Search the documents up front so every answer starts from them, not the web."""
+        try:
+            results = self.retriever.retrieve(question, PRE_RETRIEVE_K)
+        except Exception as e:
+            # e.g. embedding rate limit: the model can still call `retrieve` itself
+            print(f"[Agent] Document pre-retrieval failed: {e}")
+            return question
+        state["docs_checked"] = True
+        passages = _format_passages(results)
+        if not passages:
+            return f"{question}\n\n(No matching passages were found in the user's documents.)"
+        return (
+            f"{question}\n\n"
+            "Passages from the user's documents that may be relevant "
+            "(retrieved automatically; answer from these first):\n\n"
+            f"{passages}"
+        )
+
     def answer(self, question: str, history: list[dict] | None = None, max_turns: int = 6) -> str:
         return self.answer_with_usage(question, history, max_turns)[0]
 
@@ -232,9 +273,14 @@ class RAGAgent:
         # keep only the most recent turns so the request doesn't grow unbounded
         trimmed_history = history[-(MAX_HISTORY_TURNS * 2):]
 
+        tool_state = {"searches": 0, "search_blocked": False, "docs_checked": False}
+
         contents = _history_to_contents(trimmed_history)
         contents.append(
-            types.Content(role="user", parts=[types.Part.from_text(text=question)])
+            types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=self._with_document_context(question, tool_state))],
+            )
         )
 
         config = types.GenerateContentConfig(
@@ -259,7 +305,6 @@ class RAGAgent:
 
         malformed_retries = 0
         max_malformed_retries = 3
-        tool_state = {"searches": 0, "search_blocked": False}
         usage = {"input_tokens": 0, "output_tokens": 0, "thinking_tokens": 0, "total_tokens": 0, "model_calls": 0}
 
         for turn in range(max_turns):
